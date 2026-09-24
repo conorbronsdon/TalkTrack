@@ -19,6 +19,7 @@ from PyQt6.QtGui import QAction
 from app.utils.atomic_io import atomic_write_json, atomic_write_text
 from app.utils.config import Config
 from app.recording.audio_capture import LoopbackStream
+from app.recording.output_switching import default_output_name
 from app.recording.process_audio_capture import ProcessAudioCapture
 from app.recording.mic_monitor import MicMonitor
 from app.recording.recorder import Recorder, RecordingState
@@ -494,8 +495,8 @@ class MainWindow(QMainWindow):
         if device is None:
             return
         try:
-            dev_info = sd.query_devices(device)
-            device_name = dev_info.get("name", "")
+            device_name = (default_output_name() if device == -1
+                           else sd.query_devices(device).get("name", ""))
             self.system_monitor = LoopbackStream(
                 device_name=device_name,
                 sample_rate=self.config.get("audio", "sample_rate"),

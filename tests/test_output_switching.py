@@ -1,4 +1,6 @@
 import unittest
+import threading
+import time
 from unittest.mock import Mock
 import numpy as np
 from app.recording.output_switching import TimelineSink, SwitchingLoopbackStream
@@ -160,6 +162,15 @@ class TestSwitching(unittest.TestCase):
         self.assertEqual(self.streams[-1][0], 'headphones')
         capture.stop()
 
+    def test_inactive_stream_reconnects_same_output(self):
+        capture = self.make()
+        capture._step()
+        self.streams[-1][1].is_active = False
+        capture._step()
+        self.assertEqual([name for name, _ in self.streams], ['speakers', 'speakers'])
+        self.streams[0][1].stop.assert_called_once()
+        capture.stop()
+
     def test_pause_survives_device_switch(self):
         capture = self.make()
         capture._step()
@@ -170,3 +181,64 @@ class TestSwitching(unittest.TestCase):
         capture.resume()
         self.streams[-1][1].resume.assert_called_once()
         capture.stop()
+
+    def test_ui_requests_do_not_wait_for_driver_start(self):
+        entered = threading.Event()
+        release = threading.Event()
+        class SlowDevice:
+            is_active = True
+            def start(self):
+                entered.set()
+                release.wait(2)
+            def stop(self): pass
+            def pause(self): pass
+            def resume(self): pass
+        capture = SwitchingLoopbackStream('speakers', 100, sink=Sink(),
+                                          factory=lambda **kwargs: SlowDevice())
+        worker = threading.Thread(target=capture._step)
+        worker.start()
+        self.assertTrue(entered.wait(1))
+        changed = threading.Event()
+        def request():
+            capture.set_device('headphones')
+            capture.pause()
+            capture.resume()
+            changed.set()
+        requester = threading.Thread(target=request)
+        requester.start()
+        try:
+            self.assertTrue(changed.wait(0.2), 'UI request waited for driver startup')
+        finally:
+            release.set()
+            worker.join(1)
+            requester.join(1)
+        self.assertFalse(worker.is_alive())
+        self.assertIsNone(capture.stream)  # stale initial target was not published
+
+    def test_stop_seals_timeline_during_driver_start(self):
+        entered = threading.Event()
+        release = threading.Event()
+        class SlowDevice:
+            is_active = True
+            def start(self):
+                entered.set()
+                release.wait(2)
+            def stop(self): pass
+        capture = SwitchingLoopbackStream('speakers', 100, sink=Sink(),
+                                          factory=lambda **kwargs: SlowDevice())
+        worker = threading.Thread(target=capture._step)
+        worker.start()
+        self.assertTrue(entered.wait(1))
+        stopper = threading.Thread(target=capture.stop)
+        stopper.start()
+        try:
+            deadline = time.monotonic() + 0.2
+            while not capture.timeline.closed and time.monotonic() < deadline:
+                time.sleep(0.005)
+            self.assertTrue(capture.timeline.closed)
+        finally:
+            release.set()
+            worker.join(1)
+            stopper.join(1)
+        self.assertFalse(worker.is_alive())
+        self.assertIsNone(capture.stream)

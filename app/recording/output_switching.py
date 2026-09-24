@@ -122,51 +122,64 @@ class SwitchingLoopbackStream:
 
     def _close_stream(self):
         self.timeline.next_generation()
-        if self.stream is not None:
-            self.stream.stop()
-        self.stream = None
-        self.current = None
+        with self._lock:
+            old_stream = self.stream
+            self.stream = None
+            self.current = None
+        if old_stream is not None:
+            old_stream.stop()
 
     def _step(self):
-        with self._lock:
-            try:
-                target = self.resolver() if self.requested is None else self.requested
-                if target == '__disabled__':
-                    self._close_stream()
-                    self.status = 'System audio disabled; microphone continues'
-                    return
-                if self.stream is None or target != self.current or not self.stream.is_active:
-                    self._close_stream()
-                    self.status = 'Reconnecting system audio...'
-                    factory = self.factory
-                    if factory is None:
-                        from app.recording.audio_capture import LoopbackStream
-                        factory = LoopbackStream
-                    generation = self.timeline.next_generation()
-                    timeline = self.timeline
-                    class StreamSink:
-                        def put(self, chunk):
-                            timeline.put(chunk, generation=generation)
-                        def put_timed(self, chunk, captured_at):
-                            timeline.put(chunk, generation=generation, captured_at=captured_at)
-                    candidate = factory(device_name=target, sample_rate=self.rate,
-                                        level_callback=self._level, sink=StreamSink())
-                    try:
-                        candidate.start()
+        try:
+            with self._lock:
+                requested = self.requested
+                stream, current = self.stream, self.current
+            target = self.resolver() if requested is None else requested
+            if target == '__disabled__':
+                self._close_stream()
+                self.status = 'System audio disabled; microphone continues'
+                return
+            if stream is None or target != current or not stream.is_active:
+                self._close_stream()
+                self.status = 'Reconnecting system audio...'
+                factory = self.factory
+                if factory is None:
+                    from app.recording.audio_capture import LoopbackStream
+                    factory = LoopbackStream
+                generation = self.timeline.next_generation()
+                timeline = self.timeline
+                class StreamSink:
+                    def put(self, chunk):
+                        timeline.put(chunk, generation=generation)
+                    def put_timed(self, chunk, captured_at):
+                        timeline.put(chunk, generation=generation, captured_at=captured_at)
+                candidate = factory(device_name=target, sample_rate=self.rate,
+                                    level_callback=self._level, sink=StreamSink())
+                try:
+                    candidate.start()
+                except Exception:
+                    candidate.stop()
+                    raise
+                with self._lock:
+                    stale = self._stop.is_set() or self.requested != requested
+                    if not stale:
+                        self.stream, self.current = candidate, target
                         if self.paused:
                             candidate.pause()
-                    except Exception:
-                        candidate.stop()
-                        raise
-                    self.stream, self.current = candidate, target
-                    self.last_packet = time.monotonic()
-                if not self.paused and time.monotonic() - self.last_packet > 10:
-                    self.status = 'No system audio arriving; check playback/output: ' + target
-                else:
-                    self.status = ('Paused: ' if self.paused else 'System audio: ') + target
-            except Exception as exc:
-                self._close_stream()
-                self.status = 'System audio unavailable; retrying (' + type(exc).__name__ + ')'
+                if stale:
+                    self.timeline.next_generation()
+                    candidate.stop()
+                    return
+                self.last_packet = time.monotonic()
+            with self._lock:
+                paused = self.paused
+            if not paused and time.monotonic() - self.last_packet > 10:
+                self.status = 'No system audio arriving; check playback/output: ' + target
+            else:
+                self.status = ('Paused: ' if paused else 'System audio: ') + target
+        except Exception as exc:
+            self._close_stream()
+            self.status = 'System audio unavailable; retrying (' + type(exc).__name__ + ')'
 
     def _run(self):
         try:
@@ -175,8 +188,7 @@ class SwitchingLoopbackStream:
                 self._wake.wait(0.75)
                 self._wake.clear()
         finally:
-            with self._lock:
-                self._close_stream()
+            self._close_stream()
 
     def start(self):
         self._thread = threading.Thread(target=self._run, daemon=True)
@@ -188,13 +200,15 @@ class SwitchingLoopbackStream:
             self.paused = True
             if self.stream:
                 self.stream.pause()
+        self._wake.set()
 
     def resume(self):
+        self.timeline.resume()
         with self._lock:
-            self.timeline.resume()
             self.paused = False
             if self.stream:
                 self.stream.resume()
+        self._wake.set()
 
     def stop(self):
         self._stop.set()
@@ -204,8 +218,7 @@ class SwitchingLoopbackStream:
         if self._thread:
             self._thread.join(timeout=5)
         if self._thread is None or not self._thread.is_alive():
-            with self._lock:
-                self._close_stream()
+            self._close_stream()
 
     @property
     def is_active(self):
