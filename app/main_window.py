@@ -290,8 +290,11 @@ class MainWindow(QMainWindow):
         self.setStatusBar(self.statusbar)
         self.status_label = QLabel("Ready")
         self.statusbar.addWidget(self.status_label)
+        self.output_status_label = QLabel('')
+        self.statusbar.addPermanentWidget(self.output_status_label)
 
     def _connect_signals(self):
+        self.source_selector.output_changed.connect(self._switch_system_output)
         # Recording controls
         self.recording_controls.record_clicked.connect(self._start_recording)
         self.recording_controls.pause_clicked.connect(self._toggle_pause)
@@ -619,9 +622,20 @@ class MainWindow(QMainWindow):
             f"Recording discarded ({duration:.0f}s < {min_len}s minimum)"
         )
 
+    def _switch_system_output(self, name):
+        capture = self.recorder._capture
+        stream = getattr(capture, 'system_stream', None)
+        if self.recorder.state in (RecordingState.RECORDING, RecordingState.PAUSED) and hasattr(stream, 'set_device'):
+            stream.set_device(name)
+
     def _on_state_changed(self, state):
         self.recording_controls.set_state(state)
         self.source_selector.set_enabled(state == RecordingState.IDLE)
+        stream = getattr(self.recorder._capture, 'system_stream', None)
+        if state in (RecordingState.RECORDING, RecordingState.PAUSED) and hasattr(stream, 'set_device'):
+            self.source_selector.loopback_combo.setEnabled(True)
+        if state == RecordingState.IDLE:
+            self.output_status_label.clear()
         if hasattr(self, "tray") and self.tray.is_supported():
             self.tray.set_state(state, int(self.recorder.get_elapsed_time()))
 
@@ -644,6 +658,9 @@ class MainWindow(QMainWindow):
             self.source_selector.mark_capture_failures({})
 
     def _on_recording_tick(self, seconds):
+        stream = getattr(self.recorder._capture, 'system_stream', None)
+        if hasattr(stream, 'status'):
+            self.output_status_label.setText(stream.status)
         if hasattr(self, "tray") and self.tray.is_supported():
             self.tray.set_state(self.recorder.state, int(seconds))
         self._check_silent_capture(seconds)
