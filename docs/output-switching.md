@@ -5,8 +5,10 @@ the Windows multimedia playback endpoint. A meeting app pinned to another
 output needs that fixed output selected instead. Changes are checked every
 750 milliseconds. Device initialization adds reconnection time.
 
-The System Audio dropdown remains available during recording and pause.
-Changing it reconnects only the system stream. Microphone settings remain fixed.
+The System Audio dropdown remains available during recording and pause when
+recording started with an output selected. Changing it reconnects only the
+system stream. Starting with no system audio selected keeps the dropdown
+disabled until the next recording. Microphone settings remain fixed.
 Device unavailability is shown in the status bar and retried. If a stream receives
 no packets for ten seconds, the status asks the user to check playback/output.
 Silence alone is not proof of a disconnected device.
